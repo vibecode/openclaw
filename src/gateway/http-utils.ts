@@ -15,11 +15,16 @@ export function getHeader(req: IncomingMessage, name: string): string | undefine
 
 export function getBearerToken(req: IncomingMessage): string | undefined {
   const raw = getHeader(req, "authorization")?.trim() ?? "";
-  if (!raw.toLowerCase().startsWith("bearer ")) {
-    return undefined;
+  if (raw.toLowerCase().startsWith("bearer ")) {
+    const token = raw.slice(7).trim();
+    if (token) {
+      return token;
+    }
   }
-  const token = raw.slice(7).trim();
-  return token || undefined;
+  // Fallback: X-OpenClaw-Token header (used when Caddy basic auth consumes Authorization)
+  const headerToken = getHeader(req, "x-openclaw-token")?.trim();
+  const gatewayToken = getHeader(req, "x-openclaw-gateway-token")?.trim();
+  return headerToken || gatewayToken || undefined;
 }
 
 export function resolveAgentIdFromHeader(req: IncomingMessage): string | undefined {

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "profiles": {
+    "anthropic:default": {
+      "type": "api_key",
+      "provider": "anthropic",
+      "key": "sk-ant-api03-gu2gohc4sha1Thohpeep7ro9vie1ikai-n0tr3al"
+    }
+  }
+}

@@ -1,4 +1,22 @@
+FROM caddy:2 AS caddy
+
 FROM node:22-bookworm@sha256:cd7bcd2e7a1e6f72052feb023c7f6b722205d3fcab7bbcbd2d1bfdab10b1e935
+
+# Copy Caddy binary from official image for TLS termination and basic auth
+COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
+
+# Install gosu (for privilege de-escalation, same as agent-template) and
+# allow Caddy to bind to privileged ports (80/443) when dropped to non-root.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gosu libcap2-bin && \
+    setcap 'cap_net_bind_service=+ep' /usr/local/bin/caddy && \
+    apt-get purge -y libcap2-bin && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Match Bauxite /data volume ownership (uid/gid 10000).
+# Most deployed images run as this user, so /data is writable without needing root at runtime.
+RUN groupadd --gid 10000 vibecode && \
+    useradd --uid 10000 --gid vibecode --home-dir /home/user --create-home --shell /bin/bash vibecode
 
 # Install Bun (required for build scripts)
 RUN curl -fsSL https://bun.sh/install | bash
@@ -45,17 +63,10 @@ RUN pnpm ui:build
 ENV NODE_ENV=production
 
 # Allow non-root user to write temp files during runtime/tests.
-RUN chown -R node:node /app
+RUN chown -R vibecode:vibecode /app
 
-# Security hardening: Run as non-root user
-# The node:22-bookworm image includes a 'node' user (uid 1000)
-# This reduces the attack surface by preventing container escape via root privileges
-USER node
+# Copy entrypoint script (runs as root, drops to 'node' for the gateway process)
+COPY --chmod=0755 docker-entrypoint.sh /app/docker-entrypoint.sh
 
-# Start gateway server with default config.
-# Binds to loopback (127.0.0.1) by default for security.
-#
-# For container platforms requiring external health checks:
-#   1. Set OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD env var
-#   2. Override CMD: ["node","openclaw.mjs","gateway","--allow-unconfigured","--bind","lan"]
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+# Start gateway server via entrypoint (resolves state dir, gateway token, binds to LAN)
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
