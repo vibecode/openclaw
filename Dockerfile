@@ -1,43 +1,22 @@
-# syntax=docker/dockerfile:1.7
+FROM caddy:2 AS caddy
 
-# Opt-in extension dependencies at build time (space-separated directory names).
-# Example: docker build --build-arg OPENCLAW_EXTENSIONS="diagnostics-otel matrix" .
-#
-# Multi-stage build produces a minimal runtime image without build tools,
-# source code, or Bun. Works with Docker, Buildx, and Podman.
-# The ext-deps stage extracts only the package.json files we need from
-# extensions/, so the main build layer is not invalidated by unrelated
-# extension source changes.
-#
-# Two runtime variants:
-#   Default (bookworm):      docker build .
-#   Slim (bookworm-slim):    docker build --build-arg OPENCLAW_VARIANT=slim .
-ARG OPENCLAW_EXTENSIONS=""
-ARG OPENCLAW_VARIANT=default
-ARG OPENCLAW_NODE_BOOKWORM_IMAGE="node:22-bookworm@sha256:b501c082306a4f528bc4038cbf2fbb58095d583d0419a259b2114b5ac53d12e9"
-ARG OPENCLAW_NODE_BOOKWORM_DIGEST="sha256:b501c082306a4f528bc4038cbf2fbb58095d583d0419a259b2114b5ac53d12e9"
-ARG OPENCLAW_NODE_BOOKWORM_SLIM_IMAGE="node:22-bookworm-slim@sha256:9c2c405e3ff9b9afb2873232d24bb06367d649aa3e6259cbe314da59578e81e9"
-ARG OPENCLAW_NODE_BOOKWORM_SLIM_DIGEST="sha256:9c2c405e3ff9b9afb2873232d24bb06367d649aa3e6259cbe314da59578e81e9"
+FROM node:22-bookworm@sha256:cd7bcd2e7a1e6f72052feb023c7f6b722205d3fcab7bbcbd2d1bfdab10b1e935
 
-# Base images are pinned to SHA256 digests for reproducible builds.
-# Trade-off: digests must be updated manually when upstream tags move.
-# To update, run: docker manifest inspect node:22-bookworm (or podman)
-# and replace the digest below with the current multi-arch manifest list entry.
+# Copy Caddy binary from official image for TLS termination and basic auth
+COPY --from=caddy /usr/bin/caddy /usr/local/bin/caddy
 
-FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS ext-deps
-ARG OPENCLAW_EXTENSIONS
-COPY extensions /tmp/extensions
-# Copy package.json for opted-in extensions so pnpm resolves their deps.
-RUN mkdir -p /out && \
-    for ext in $OPENCLAW_EXTENSIONS; do \
-      if [ -f "/tmp/extensions/$ext/package.json" ]; then \
-        mkdir -p "/out/$ext" && \
-        cp "/tmp/extensions/$ext/package.json" "/out/$ext/package.json"; \
-      fi; \
-    done
+# Install gosu (for privilege de-escalation, same as agent-template) and
+# allow Caddy to bind to privileged ports (80/443) when dropped to non-root.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gosu libcap2-bin && \
+    setcap 'cap_net_bind_service=+ep' /usr/local/bin/caddy && \
+    apt-get purge -y libcap2-bin && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
-# ── Stage 2: Build ──────────────────────────────────────────────
-FROM ${OPENCLAW_NODE_BOOKWORM_IMAGE} AS build
+# Match Bauxite /data volume ownership (uid/gid 10000).
+# Most deployed images run as this user, so /data is writable without needing root at runtime.
+RUN groupadd --gid 10000 vibecode && \
+    useradd --uid 10000 --gid vibecode --home-dir /home/user --create-home --shell /bin/bash vibecode
 
 # Install Bun (required for build scripts)
 RUN curl -fsSL https://bun.sh/install | bash
@@ -208,23 +187,11 @@ RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw \
 
 ENV NODE_ENV=production
 
-# Security hardening: Run as non-root user
-# The node:22-bookworm image includes a 'node' user (uid 1000)
-# This reduces the attack surface by preventing container escape via root privileges
-USER node
+# Allow non-root user to write temp files during runtime/tests.
+RUN chown -R vibecode:vibecode /app
 
-# Start gateway server with default config.
-# Binds to loopback (127.0.0.1) by default for security.
-#
-# IMPORTANT: With Docker bridge networking (-p 18789:18789), loopback bind
-# makes the gateway unreachable from the host. Either:
-#   - Use --network host, OR
-#   - Override --bind to "lan" (0.0.0.0) and set auth credentials
-#
-# Built-in probe endpoints for container health checks:
-#   - GET /healthz (liveness) and GET /readyz (readiness)
-#   - aliases: /health and /ready
-# For external access from host/ingress, override bind to "lan" and set auth.
-HEALTHCHECK --interval=3m --timeout=10s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+# Copy entrypoint script (runs as root, drops to 'node' for the gateway process)
+COPY --chmod=0755 docker-entrypoint.sh /app/docker-entrypoint.sh
+
+# Start gateway server via entrypoint (resolves state dir, gateway token, binds to LAN)
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
