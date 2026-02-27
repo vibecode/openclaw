@@ -1,0 +1,30 @@
+name: Sync fork with upstream
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # daily at 6am UTC
+  workflow_dispatch: # allow manual trigger
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/openclaw/openclaw.git
+
+      - name: Fetch upstream
+        run: git fetch upstream
+
+      - name: Rebase onto upstream/main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git rebase upstream/main
+
+      - name: Push
+        run: git push origin main --force-with-lease
